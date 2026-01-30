@@ -47,15 +47,12 @@ void main() async {
         ),
       ),
 
-      // AQUI ESTÁ A MÁGICA PARA O QR CODE / LINK FUNCIONAR
+      // ROTEAMENTO INTELIGENTE (SLUG OU ID)
       onGenerateRoute: (settings) {
-        // O Flutter pega automaticamente o que vem depois do /#/
-        // Ex: se acessar /#/bronzedagil, o settings.name será "/bronzedagil"
-
         String? slugDetectado;
 
         if (settings.name != null && settings.name != '/') {
-          // Remove a barra inicial se tiver (de "/bronzedagil" para "bronzedagil")
+          // Remove a barra inicial (de "/15" para "15")
           slugDetectado = settings.name!.replaceAll('/', '');
         }
 
@@ -68,10 +65,10 @@ void main() async {
 }
 
 // ============================================================================
-// TELA 1: LANDING (O PORTEIRO INTELIGENTE)
+// TELA 1: LANDING (O PORTEIRO INTELIGENTE COM SUPORTE A ID)
 // ============================================================================
 class LandingScreen extends StatefulWidget {
-  final String? slugViaUrl; // Recebe o nome da loja direto da URL
+  final String? slugViaUrl; // Pode ser nome ("bronzedagil") ou ID ("15")
 
   const LandingScreen({super.key, this.slugViaUrl});
 
@@ -94,28 +91,72 @@ class _LandingScreenState extends State<LandingScreen> {
   }
 
   void _iniciarAcesso() async {
-    // 1. Prioridade Total: URL (Link do WhatsApp/QR Code)
+    // 1. Prioridade Total: URL (Link com ID ou Nome)
     if (widget.slugViaUrl != null && widget.slugViaUrl!.isNotEmpty) {
-      _buscarLoja(widget.slugViaUrl!);
+      // Verifica se é um NÚMERO (Novo padrão) ou TEXTO (Antigo)
+      if (int.tryParse(widget.slugViaUrl!) != null) {
+        _buscarPorId(int.parse(widget.slugViaUrl!));
+      } else {
+        _buscarPorSlug(widget.slugViaUrl!); // Mantém suporte a links antigos
+      }
       return;
     }
 
     // 2. Se não tem URL, tenta a memória (Cache)
     final prefs = await SharedPreferences.getInstance();
-    final ultimoSalao = prefs.getString('ultimo_salao_slug');
+    
+    // Tenta recuperar ID primeiro (mais seguro)
+    final ultimoId = prefs.getInt('ultimo_salao_id');
+    if (ultimoId != null) {
+      _buscarPorId(ultimoId);
+      return;
+    }
 
-    if (ultimoSalao != null) {
-      _buscarLoja(ultimoSalao);
-    } else {
-      // 3. Último caso: Mostra campo de busca (apenas se não tiver link nem memória)
+    // Se não tiver ID, tenta slug antigo
+    final ultimoSlug = prefs.getString('ultimo_salao_slug');
+    if (ultimoSlug != null) {
+      _buscarPorSlug(ultimoSlug);
+      return;
+    }
+
+    // 3. Último caso: Mostra campo de busca
+    setState(() {
+      _modoBusca = true;
+      _mensagemStatus = "Digite o ID ou Link da loja";
+    });
+  }
+
+  // --- NOVA FUNÇÃO: BUSCA POR ID (MUITO MAIS SEGURA) ---
+  void _buscarPorId(int id) async {
+    setState(() {
+      _modoBusca = false;
+      _erro = false;
+      _mensagemStatus = "Acessando loja #$id...";
+    });
+
+    try {
+      // Chama a rota nova que criamos no Django
+      final response = await _client.dio.get('salao-id/$id/');
+      final dadosSalao = response.data;
+
+      // Salva na memória o ID (que nunca muda!)
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt('ultimo_salao_id', id);
+
+      if (mounted) {
+        _irParaLogin(dadosSalao);
+      }
+    } catch (e) {
       setState(() {
+        _erro = true;
         _modoBusca = true;
-        _mensagemStatus = "Digite o nome da loja para acessar";
+        _mensagemStatus = "Loja #$id não encontrada.";
       });
     }
   }
 
-  void _buscarLoja(String slug) async {
+  // --- FUNÇÃO LEGADA: BUSCA POR SLUG (PARA LINKS ANTIGOS) ---
+  void _buscarPorSlug(String slug) async {
     setState(() {
       _modoBusca = false;
       _erro = false;
@@ -126,32 +167,35 @@ class _LandingScreenState extends State<LandingScreen> {
       final response = await _client.dio.get('salao-info/$slug/');
       final dadosSalao = response.data;
 
-      // Salva na memória para a próxima vez
+      // Aproveita e já salva o ID para o futuro
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('ultimo_salao_slug', slug);
+      await prefs.setInt('ultimo_salao_id', dadosSalao['id']);
 
       if (mounted) {
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (_) => IdentificacaoScreen(
-              salaoId: dadosSalao['id'],
-              salaoNome: dadosSalao['nome'],
-              salaoTelefone: dadosSalao['telefone'] ?? "",
-              salaoInstagram: dadosSalao['instagram'],
-              salaoEndereco: dadosSalao['endereco'],
-            ),
-          ),
-        );
+        _irParaLogin(dadosSalao);
       }
     } catch (e) {
       setState(() {
         _erro = true;
-        _modoBusca = true; // Libera a busca manual se o link estiver errado
-        _mensagemStatus =
-            "Não foi possível conectar à loja '$slug'.\nVerifique o link ou sua internet.";
+        _modoBusca = true;
+        _mensagemStatus = "Loja '$slug' não encontrada.";
       });
     }
+  }
+
+  void _irParaLogin(dynamic dadosSalao) {
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(
+        builder: (_) => IdentificacaoScreen(
+          salaoId: dadosSalao['id'],
+          salaoNome: dadosSalao['nome'],
+          salaoTelefone: dadosSalao['telefone'] ?? "",
+          salaoInstagram: dadosSalao['instagram'],
+          salaoEndereco: dadosSalao['endereco'],
+        ),
+      ),
+    );
   }
 
   @override
@@ -201,7 +245,6 @@ class _LandingScreenState extends State<LandingScreen> {
                       ),
                     ),
                   ] else ...[
-                    // Só aparece se o link falhar ou não existir
                     Text(
                       "Bem-vindo(a)!",
                       style: GoogleFonts.poppins(
@@ -212,7 +255,7 @@ class _LandingScreenState extends State<LandingScreen> {
                     ),
                     const SizedBox(height: 10),
                     Text(
-                      _erro ? _mensagemStatus : "Digite o nome da loja:",
+                      _erro ? _mensagemStatus : "Digite o ID ou Link da loja:",
                       textAlign: TextAlign.center,
                       style: GoogleFonts.poppins(
                         color: _erro ? Colors.red : Colors.grey[700],
@@ -221,14 +264,22 @@ class _LandingScreenState extends State<LandingScreen> {
                     ),
                     const SizedBox(height: 20),
 
+                    // CAMPO DE BUSCA INTELIGENTE (Aceita número ou texto)
                     TextField(
                       controller: _buscaController,
+                      keyboardType: TextInputType.text, // Aceita letras e números
                       decoration: const InputDecoration(
-                        hintText: "Ex: bronzedagil",
-                        prefixIcon: Icon(Icons.search),
+                        hintText: "Ex: 15 ou bronzedagil",
+                        prefixIcon: Icon(Icons.link),
                         fillColor: Colors.white,
                       ),
-                      onSubmitted: (val) => _buscarLoja(val),
+                      onSubmitted: (val) {
+                         if (int.tryParse(val) != null) {
+                           _buscarPorId(int.parse(val));
+                         } else {
+                           _buscarPorSlug(val);
+                         }
+                      },
                     ),
                     const SizedBox(height: 20),
 
@@ -236,8 +287,13 @@ class _LandingScreenState extends State<LandingScreen> {
                       width: double.infinity,
                       child: ElevatedButton(
                         onPressed: () {
-                          if (_buscaController.text.isNotEmpty) {
-                            _buscarLoja(_buscaController.text.trim());
+                          final texto = _buscaController.text.trim();
+                          if (texto.isNotEmpty) {
+                            if (int.tryParse(texto) != null) {
+                               _buscarPorId(int.parse(texto));
+                             } else {
+                               _buscarPorSlug(texto);
+                             }
                           }
                         },
                         child: Text(
@@ -260,7 +316,7 @@ class _LandingScreenState extends State<LandingScreen> {
 }
 
 // ============================================================================
-// TELA 2: IDENTIFICAÇÃO (MANTENHA O CÓDIGO DA IDENTIFICAÇÃO AQUI PARA BAIXO)
+// TELA 2: IDENTIFICAÇÃO (PERMANECE IGUAL)
 // ============================================================================
 class IdentificacaoScreen extends StatefulWidget {
   final int salaoId;
